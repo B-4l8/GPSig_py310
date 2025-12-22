@@ -1,10 +1,16 @@
-matplotlib==3.1.3
-tqdm==4.36.1
-numpy==1.19.2
-scipy==1.1.0
-scikit-learn==0.23.0
-sktime==0.4.1
-tensorflow==1.15.3
-gpflow==1.5.1
-keras==2.3.1
-requests==2.24.0
+# Core Frameworks (TF 2.10 supports NVIDIA 3000 series & Python 3.10)
+tensorflow==2.10.0
+tensorflow-probability==0.18.0
+gpflow==2.9.0
+keras==2.10.0
+
+# Data Science Stack (Compatible with TF 2.10 & Python 3.10)
+numpy==1.23.5
+scipy==1.10.1
+scikit-learn==1.2.2
+matplotlib==3.7.1
+sktime==0.17.0
+
+# Utilities
+tqdm==4.65.0
+requests==2.31.0
