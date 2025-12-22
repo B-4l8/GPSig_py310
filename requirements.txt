@@ -1,10 +1,10 @@
-# Core Frameworks (TF 2.10 supports NVIDIA 3000 series & Python 3.10)
+# Core
 tensorflow==2.10.0
 tensorflow-probability==0.18.0
 gpflow==2.9.0
 keras==2.10.0
 
-# Data Science Stack (Compatible with TF 2.10 & Python 3.10)
+# Data
 numpy==1.23.5
 scipy==1.10.1
 scikit-learn==1.2.2
