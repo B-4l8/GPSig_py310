@@ -1,212 +1,149 @@
-from sys import modules
-from copy import deepcopy
-
+import time
 import numpy as np
 import tensorflow as tf
+import gpflow
+from gpflow import optimizers
 
-from gpflow import actions, settings
-from gpflow.training.tensorflow_optimizer import _TensorFlowOptimizer, _REGISTERED_TENSORFLOW_OPTIMIZERS
-
-### Imports optimizers from TF contrib, uses same code as in GPflow
-
-def _register_optimizer(name, optimizer_type):
-    #if optimizer_type.__base__ is not tf.train.Optimizer and optimizer_type.__base__.__base__ is not tf.train.Optimizer \
-    #    and optimizer_type.__base__.__base__.__base__ is not tf.train.Optimizer:
-    #    raise ValueError('Wrong TensorFlow optimizer type passed: "{0}".'
-    #                     .format(optimizer_type))
-    gp_optimizer = type(name, (_TensorFlowOptimizer, ), {})
-    module = modules[__name__]
-    _REGISTERED_TENSORFLOW_OPTIMIZERS[name] = optimizer_type
-    setattr(module, name, gp_optimizer)
-
-for key, train_type in tf.contrib.opt.__dict__.items():
-    suffix = 'Optimizer'
-    if key != suffix and key.endswith(suffix):
-        _register_optimizer(key, train_type)
-
-
-### GPflow actions based helpers for training models
-
-class print_iter(actions.Action):
-    def __init__(self, model):
-        self.model = model
-    def run(self, ctx):
-        print('\rIteration {}'.format(ctx.iteration), end='')
-        
-class print_timing(actions.Action):
-    def __init__(self, model, start_time):
-        self.model = model
-        self.start_time = start_time
-        
-    def run(self, ctx):
-        print('\t|\tTime: {:.2f}'.format(ctx.time_spent + self.start_time), end='')
-
-class print_elbo(actions.Action):
-    
-    def __init__(self, model):
-        self.model = model
-        
-    def run(self, ctx):
-        likelihood = ctx.session.run(self.model.likelihood_tensor)
-        print('\t|\tELBO: {:.2f}'.format(likelihood), end='')
-
-class save_snapshot(actions.Action):
-    def __init__(self, model, start_time, history, val_scorer = None, save_params = False, callbacks = None, save_best_params = False, var_list = None, lower_is_better = False, patience = None):
-        self.model = model
-        self.history = history
-        self.val_scorer = val_scorer
-        self.save_params = save_params
-        self.start_time = start_time
-        self.callbacks = callbacks
-        self.save_best_params = save_best_params
-        self.var_list = var_list
-        self.lower_is_better = lower_is_better
-        self.patience = patience
-        
-    def run(self, ctx):
-        current_iter = ctx.iteration
-        current_time = ctx.time_spent + self.start_time
-        self.history[current_iter] = {}
-        self.history[current_iter]['time'] = current_time
-        likelihood = ctx.session.run(self.model.likelihood_tensor)
-        self.history[current_iter]['elbo'] = likelihood
-        print('\t|\tELBO: {:.2f}'.format(likelihood), end = '')
-        if self.save_params:
-            save_trainables = {}
-            for param in self.model.parameters:
-                save_trainables[param.pathname] = ctx.session.run(param.constrained_tensor)
-            self.history[current_iter]['params'] = save_trainables
-
-        if self.callbacks is not None:
-            if isinstance(self.callbacks, list):
-                self.history[current_iter]['saved'] = []
-                for i, callback in enumerate(self.callbacks):
-                    self.history[current_iter]['saved'].append(callback(self.model))
-            else:
-                self.history[current_iter]['saved'] = [self.callbacks(self.model)]
-
-        if self.val_scorer is not None:
-            if isinstance(self.val_scorer, list):
-                scores = []
-                for i, scorer in enumerate(self.val_scorer):
-                    score = scorer(self.model)
-                    print('\t|\tVal. {}: {:.4f}'.format(i, score), end = '')
-                    scores.append(score)
-                self.history[current_iter]['val'] = scores
-                score = scores[-1]
-            else:
-                score = self.val_scorer(self.model)
-                print('\t|\tVal. : {:.4f}'.format(score), end = '')
-                self.history[current_iter]['val'] = score
-                scores = score
-            
-            if self.save_best_params:
-                if 'best' in self.history:
-                    if isinstance(self.history['best']['val'], list):
-                        best_so_far = self.history['best']['val'][-1]
-                    else:
-                        best_so_far = self.history['best']['val']
-                
-                save_current_params = False
-                if 'best' not in self.history:
-                    self.history['best'] = {}
-                    save_current_params = True
-                elif (self.lower_is_better and score <= best_so_far) or (not self.lower_is_better and score >= best_so_far):
-                    save_current_params = True 
-
-                if save_current_params:
-                    self.history['best']['iter'] = current_iter 
-                    self.history['best']['time'] = current_time
-                    self.history['best']['elbo'] = likelihood
-                    self.history['best']['val'] = scores
-                    
-                    if self.var_list is None:
-                        save_trainables = {}
-                        for param in self.model.parameters:
-                            save_trainables[param.pathname] = ctx.session.run(param.constrained_tensor)
-                        self.history['best']['params'] = save_trainables
-                    else:
-                        self.history['best']['params'] = ctx.session.run(self.var_list)
-
-            if self.patience is not None:
-                best_iter = self.history['best']['iter']
-                if current_iter - best_iter > self.patience:
-                    print('\nNo improvement over validation loss has occured for {} iterations: stopping early...'.format(self.patience))
-                    raise actions.Loop.Break
-                        
-        print()
-    
-
-def optimize(model, opt, max_iter=1000, print_freq=1, save_freq=50, val_scorer=None, history=None, callbacks=None,
+def optimize(model, opt, data=None, max_iter=1000, print_freq=1, save_freq=50, val_scorer=None, history=None, callbacks=None,
                 save_params=False, start_iter=0, global_step=None, var_list=None, save_best_params=False, lower_is_better=False, patience=None):
-    # try:
-    if isinstance(opt, list):
-        assert isinstance(var_list, list)
-        assert len(var_list) == len(opt) or len(var_list) + 1 == len(opt)
-        action_list = []
-        if len(var_list) == len(opt):
-            for i, vars in enumerate(var_list):
-                action_list.append(opt[i].make_optimize_action(model, global_step=global_step, var_list=vars))
-        elif len(var_list) + 1 == len(opt):
-            considered_vars = []
-            for i, vars in enumerate(var_list):
-                considered_vars = considered_vars + vars
-                action_list.append(opt[i].make_optimize_action(model, global_step=global_step, var_list=vars))
-            remaining_vars = []
-            for var in model.trainable_tensors:
-                if var not in considered_vars:
-                    remaining_vars.append(var)
-            action_list.append(opt[-1].make_optimize_action(model, global_step=global_step, var_list=remaining_vars))
-    else:
-        if var_list is None:
-            action_list = [opt.make_optimize_action(model, global_step=global_step)]
-        else:
-            action_list = [opt.make_optimize_action(model, global_step=global_step, var_list=var_list)]
-
+    
+    # Initialize history
     if history is None or len([x for x in history.keys() if str(x).isnumeric()]) == 0:
         history = {}
         start_iter = 0
         start_time = 0.0
     else:
-        start_iter = max([x for x in history.keys() if str(x).isnumeric()])
-        start_time = history[start_iter]['time']
+        # Find numeric keys to determine last iteration
+        numeric_keys = [x for x in history.keys() if str(x).isnumeric()]
+        start_iter = max(numeric_keys) if numeric_keys else 0
+        start_time = history[start_iter]['time'] if numeric_keys else 0.0
 
-
-    if 'best' in history:
+    if 'best' not in history:
+        history['best'] = {}
+        history['best']['val'] = -np.inf if not lower_is_better else np.inf
         history['best']['iter'] = start_iter
         history['best']['time'] = start_time
-        if var_list is None:
-            history['best']['params'] = {}
-            for param in model.parameters:
-                history['best']['params'][param.pathname] = model.enquire_session().run(param.constrained_tensor)
+
+    # Helper to get elbo/loss
+    def get_elbo_val():
+        if data is not None:
+             return model.maximum_log_likelihood_objective(data).numpy()
         else:
-            history['best']['params'] = model.enquire_session().run(var_list)
+             # Try parameterless, or fallback to training loss (neg likelihood)
+             try:
+                return model.maximum_log_likelihood_objective().numpy()
+             except:
+                return -model.training_loss().numpy()
 
+    # Helper to save snapshot
+    def perform_save(i, t):
+        try:
+            elbo = get_elbo_val()
+        except:
+            elbo = np.nan
+            
+        history[i] = {}
+        history[i]['time'] = t
+        history[i]['elbo'] = elbo
+        
+        print('\rIteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t + start_time, elbo), end='')
 
-    print_it = actions.Condition(lambda ctx: ctx.iteration % print_freq == 0 or ctx.iteration == max_iter + 1, print_iter(model))
-    print_tm = actions.Condition(lambda ctx: ctx.iteration % print_freq == 0 or ctx.iteration == max_iter + 1, print_timing(model, start_time))
+        if save_params:
+            save_trainables = {}
+            for param in model.trainable_variables:
+                 save_trainables[param.name] = param.numpy()
+            history[i]['params'] = save_trainables
+
+        if callbacks is not None:
+             cbs = callbacks if isinstance(callbacks, list) else [callbacks]
+             history[i]['saved'] = [cb(model) for cb in cbs]
+
+        if val_scorer is not None:
+            scorers = val_scorer if isinstance(val_scorer, list) else [val_scorer]
+            scores = [scr(model) for scr in scorers]
+            
+            for j, score in enumerate(scores):
+                 label = f"Val. {j}" if len(scores) > 1 else "Val."
+                 print(f" \t|\t{label}: {score:.4f}", end='')
+            
+            history[i]['val'] = scores if len(scores) > 1 else scores[0]
+            current_score = scores[-1] 
+            
+            best_val = history['best'].get('val')
+            if best_val is None: best_val = -np.inf if not lower_is_better else np.inf
+            
+            improved = (lower_is_better and current_score < best_val) or (not lower_is_better and current_score > best_val)
+            
+            if improved:
+                history['best']['val'] = current_score
+                history['best']['iter'] = i
+                history['best']['time'] = t
+                history['best']['elbo'] = elbo
+                history['best']['params'] = {p.name: p.numpy() for p in model.trainable_variables}
+            
+            if patience is not None:
+                if i - history['best']['iter'] > patience:
+                     print('\nNo improvement for {} iterations. Stopping.'.format(patience))
+                     return True 
+                     
+        print('', end='') # Flush
+        return False
+
+    # Check optimizer type
+    is_scipy = isinstance(opt, gpflow.optimizers.Scipy)
     
-    
-    save = actions.Condition(lambda ctx: ctx.iteration % save_freq == 0 or ctx.iteration == max_iter + 1,
-                                    save_snapshot(model, start_time, history, val_scorer, save_params, callbacks, save_best_params, var_list, lower_is_better, patience))
+    if is_scipy:
+        closure = model.training_loss_closure(data) if data is not None else model.training_loss
+        print('Starting optimization with Scipy...')
+        opt.minimize(closure, model.trainable_variables, options=dict(maxiter=max_iter))
+        print('\nOptimization finished.')
+    else:
+        # TF Optimizer loop
+        opts = opt if isinstance(opt, list) else [opt]
+        # var_list logic
+        vars_lists = [None] * len(opts)
+        if var_list is not None:
+             if isinstance(var_list, list) and isinstance(var_list[0], list):
+                 vars_lists = var_list
+             else:
+                 vars_lists = [var_list]
 
-    action_list += [print_it, print_tm, save]
+        if data is not None:
+            closure = model.training_loss_closure(data)
+        else:
+            closure = model.training_loss
 
-    if start_iter == 0:
         print('-------------------------')
         print('  Starting optimization  ')
         print('-------------------------')
-    else:
-        print('---------------------------')
-        print('  Continuing optimization  ')
-        print('---------------------------')
-    actions.Loop(action_list, stop = start_iter + max_iter + 1, start = start_iter + 1)()
+        
+        t0 = time.time()
+        
+        for i in range(start_iter + 1, start_iter + max_iter + 1):
+             
+             # Optimization Step
+             for j, optimizer in enumerate(opts):
+                 variables = vars_lists[j] if vars_lists[j] is not None else model.trainable_variables
+                 with tf.GradientTape() as tape:
+                     tape.watch(variables)
+                     loss = closure()
+                 grads = tape.gradient(loss, variables)
+                 optimizer.apply_gradients(zip(grads, variables))
+            
+             t_now = time.time() - t0
+             
+             # Print / Save
+             if i % print_freq == 0 or i % save_freq == 0:
+                  if i % save_freq == 0:
+                       stop = perform_save(i, t_now)
+                       if stop: break
+                  elif i % print_freq == 0:
+                       try:
+                           elbo = get_elbo_val()
+                       except:
+                           elbo = np.nan
+                       print('\rIteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t_now + start_time, elbo), end='')
 
-    model.anchor(model.enquire_session())
-    # except Exception as e:
-    #     print('Error code: {}'.format(str(e)))
-    #     print('Error occured. Halting optimisation.')
-
-    print('\nOptimization session finished...')
+        print('\nOptimization session finished...')
         
     return history
