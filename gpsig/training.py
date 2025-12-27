@@ -43,10 +43,10 @@ def optimize(model, opt, data=None, max_iter=1000, print_freq=1, save_freq=50, v
             elbo = np.nan
             
         history[i] = {}
-        history[i]['time'] = t
+        history[i]['time'] = t + start_time
         history[i]['elbo'] = elbo
         
-        print('\rIteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t + start_time, elbo), end='')
+        print('Iteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t + start_time, elbo), end='')
 
         if save_params:
             save_trainables = {}
@@ -86,7 +86,7 @@ def optimize(model, opt, data=None, max_iter=1000, print_freq=1, save_freq=50, v
                      print('\nNo improvement for {} iterations. Stopping.'.format(patience))
                      return True 
                      
-        print('', end='') # Flush
+        print('') # Flush
         return False
 
     # Check optimizer type
@@ -142,7 +142,7 @@ def optimize(model, opt, data=None, max_iter=1000, print_freq=1, save_freq=50, v
                            elbo = get_elbo_val()
                        except:
                            elbo = np.nan
-                       print('\rIteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t_now + start_time, elbo), end='')
+                       print('Iteration {} \t|\tTime: {:.2f} \t|\tELBO: {:.2f}'.format(i, t_now + start_time, elbo))
 
         print('\nOptimization session finished...')
         
